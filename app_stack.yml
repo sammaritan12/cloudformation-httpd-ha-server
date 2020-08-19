@@ -1,0 +1,149 @@
+Description: An autoscaling web server using EC2, ALB, ASG components
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: mark-dev2-key
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+
+  InstanceType:
+    Description: Webserver EC2 instance Type
+    Type: String
+    Default: t2.small
+    AllowedValues:
+      - t1.micro
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+    ConstraintDescription: must be a valid EC2 instance Type
+
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instance
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    Default: 0.0.0.0/0
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+
+  SubnetsForAutoscale:
+    Description: Subnet Id AZ1 that's linked with the VpcId
+    Type: List<String>
+    Default: "subnet-0de4d56d3166b4b3e,subnet-0e3783d7bf32dfb74"
+
+  VpcId:
+    Description: Default VPC Id of infrastructure
+    Type: String
+    Default: vpc-0d7deb7ce334d155e
+
+Resources:
+  AutoscaleGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref SubnetsForAutoscale
+      DesiredCapacity: 1
+      LaunchConfigurationName: !Ref LaunchConfig
+      TargetGroupARNs:
+        - Ref: TG
+      MaxSize: 4
+      MinSize: 1
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-autoscale-example"
+          PropagateAtLaunch: true
+
+  LaunchConfig:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    Properties:
+      InstanceType: !Ref InstanceType
+      SecurityGroups: [!Ref InstanceSecurityGroup]
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: ami-0b9cbbe1c10b98a11
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo su -
+          yum update -y
+          yum install httpd -y
+          service httpd start
+          chkconfig httpd on
+          cd /var/www/html
+          echo "<html><body>hello world</body></html>" > index.html
+
+  TG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 120
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Name: !Sub "${AWS::StackName}-TG"
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: '30'
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH access via port 22
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: !Ref SSHLocation
+      VpcId: !Ref VpcId
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      SecurityGroups: [!Ref InstanceSecurityGroup]
+      Subnets: !Ref SubnetsForAutoscale
+
+  ALBListener80:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: TG
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: '80'
+      Protocol: HTTP
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: [mp-ec2-test-role]
+
+  ScheduledActionIn:
+    Type: AWS::AutoScaling::ScheduledAction
+    Properties:
+      AutoScalingGroupName: !Ref AutoscaleGroup
+      DesiredCapacity: 3
+      Recurrence: "50 * * * *"
+
+  ScheduledActionOut:
+    Type: AWS::AutoScaling::ScheduledAction
+    Properties:
+      AutoScalingGroupName: !Ref AutoscaleGroup
+      DesiredCapacity: 1
+      Recurrence: "55 * * * *"
+
+Outputs:
+  ALBDNS:
+    Value: !GetAtt [LoadBalancer, DNSName]
+    Description: Application Load Balancer DNS Name
